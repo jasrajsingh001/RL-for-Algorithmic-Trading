@@ -36,6 +36,9 @@ class TradingEnv(gym.Env):
         transaction_cost_pct: float = 0.001,
         sharpe_reward_eta: float = 0.1,
         feature_cols=None,
+        trade_deadband=0.05,    # NEW: only rebalance if |w_tgt - w_now| > 5%
+        trade_cooldown=3,       # NEW: lock trading for N days after any trade
+        slippage_bps=0.0
     ):
         super().__init__()
 
@@ -87,6 +90,11 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Discrete(3)
         self._action_to_string = {0: "Flat (0%)", 1: "Half (50%)", 2: "Full (100%)"}
 
+        self.trade_deadband = float(trade_deadband)
+        self.trade_cooldown = int(trade_cooldown)
+        self.slippage_bps   = float(slippage_bps)
+        self._cooldown_left = 0            
+
     # ========= Helpers =========
     def _get_observation(self):
         start_idx = self.current_step - self.lookback_window + 1
@@ -121,6 +129,8 @@ class TradingEnv(gym.Env):
         self.portfolio_value = float(self.initial_capital)
         self.A = 0.0
         self.B = 0.0
+        self._cooldown_left = 0
+
 
         self._last_action = 0
         self._last_reward = 0.0
@@ -144,51 +154,58 @@ class TradingEnv(gym.Env):
         # --- Snapshot for reward ---
         previous_portfolio_value = float(self.portfolio_value)
 
-        # --- Current price & state ---
-        idx = self.df.index[self.current_step]
-        price = float(self.df.loc[idx, "Close_raw"])
+        # --- trading / rebalancing with deadband + cooldown + slippage ---
+        price = float(self.df.loc[self.df.index[self.current_step], "Close_raw"])
 
-        # Fallback pv in case of first step numerical edge
-        prev_value = (
-            previous_portfolio_value
-            if previous_portfolio_value > 0
-            else (self.cash + self.shares_held * price)
-        )
+# slippage quotes (optional realism; 1 bp = 0.01%)
+        buy_px  = price * (1.0 + self.slippage_bps / 1e4)
+        sell_px = price * (1.0 - self.slippage_bps / 1e4)
 
-        # Current weight (0..1) in asset; guard division
+        prev_value = self.portfolio_value if self.portfolio_value > 0 else (self.cash + self.shares_held * price)
         w_now = 0.0 if prev_value <= 1e-9 else (self.shares_held * price) / prev_value
 
-        # Target weights for Discrete(3)
-        targets = {0: 0.0, 1: 0.5, 2: 1.0}
-        w_tgt = float(targets[int(action)])
+        targets = {0: 0.0, 1: 0.5, 2: 1.0}  # 0% / 50% / 100% weights
+        w_tgt = targets[int(action)]
 
-        # Notional trade to move to target (one-shot rebalance)
-        trade_val = (w_tgt - w_now) * prev_value
+        traded = False
+        if self._cooldown_left > 0:
+            self._cooldown_left -= 1
+        else:
+    # only trade if far enough from target (deadband)
+            if abs(w_tgt - w_now) > self.trade_deadband:
+                trade_val = (w_tgt - w_now) * prev_value  # >0 buy, <0 sell
 
-        # --- Execute trade with costs ---
-        if trade_val > 0:  # Buy
-            gross = min(trade_val, self.cash)
-            shares = gross / price if price > 0 else 0.0
-            fee = shares * price * self.transaction_cost_pct
-            # Adjust if fees would exceed cash
-            if gross + fee > self.cash and price > 0:
-                shares = self.cash / (price * (1.0 + self.transaction_cost_pct))
-                gross = shares * price
-                fee = gross * self.transaction_cost_pct
-            self.shares_held += shares
-            self.cash -= (gross + fee)
+                if trade_val > 0:  # BUY
+                    gross = min(trade_val, self.cash)
+                    shares = gross / buy_px if buy_px > 0 else 0.0
+                    fee = shares * buy_px * self.transaction_cost_pct
+            # scale down if fees push cash negative
+                    if gross + fee > self.cash and buy_px > 0:
+                        shares = self.cash / (buy_px * (1 + self.transaction_cost_pct))
+                        gross = shares * buy_px
+                        fee = gross * self.transaction_cost_pct
+                    if shares > 0:
+                        self.shares_held += shares
+                        self.cash -= (gross + fee)
+                        traded = True
 
-        elif trade_val < 0:  # Sell
-            gross = min(abs(trade_val), self.shares_held * price)
-            shares = gross / price if price > 0 else 0.0
-            proceeds = shares * price
-            fee = proceeds * self.transaction_cost_pct
-            self.shares_held -= shares
-            self.cash += (proceeds - fee)
+                elif trade_val < 0:  # SELL
+                    gross = min(abs(trade_val), self.shares_held * sell_px)
+                    shares = gross / sell_px if sell_px > 0 else 0.0
+                    proceeds = shares * sell_px
+                    fee = proceeds * self.transaction_cost_pct
+                    if shares > 0:
+                        self.shares_held -= shares
+                        self.cash += (proceeds - fee)
+                        traded = True
 
-        # Mark-to-market
-        self.portfolio_value = float(self.cash + self.shares_held * price)
-        current_price = price
+                if traded and self.trade_cooldown > 0:
+                    self._cooldown_left = self.trade_cooldown
+
+        # mark-to-market after potential trade
+        self.portfolio_value = self.cash + self.shares_held * price
+        current_price = price  # keep for logging
+
 
         # --- DSR reward (guarded) ---
         daily_return = float((self.portfolio_value / (previous_portfolio_value + 1e-9)) - 1.0)

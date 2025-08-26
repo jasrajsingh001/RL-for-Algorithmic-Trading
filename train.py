@@ -53,6 +53,9 @@ def main():
         initial_capital=INITIAL_CAPITAL,
         transaction_cost_pct=TRANSACTION_COST_PCT,
         sharpe_reward_eta=SHARPE_REWARD_ETA,
+        trade_deadband=0.05,   # try 0.03–0.07 later
+        trade_cooldown=3,      # try 2–5 later
+        slippage_bps=1.0
     )
 
     # 3a. Env check on the base Dict-obs env (good sanity check)
