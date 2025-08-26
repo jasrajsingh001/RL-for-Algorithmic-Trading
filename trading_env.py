@@ -11,6 +11,7 @@ DEFAULT_FEATURE_COLS = [
     "SMA_20", "SMA_50", "EMA_20", "EMA_50",
     "RSI", "MACD", "MACD_Signal", "MACD_Hist",
     "Close_norm",
+    "RET_1D","VOL_20","VOL_SHOCK","TREND_20_50",
 ]
 
 
