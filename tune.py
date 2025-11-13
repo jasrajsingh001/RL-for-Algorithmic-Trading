@@ -17,7 +17,7 @@ from analyze import calculate_sharpe_ratio
 # ----------------------------
 # Global config for tuning
 # ----------------------------
-TICKER = "AAPL"
+TICKER = "AMZN"
 DATA_PATH = os.path.join("processed", f"{TICKER}_all_splits.csv")
 
 INITIAL_CAPITAL = 100000.0
@@ -26,7 +26,7 @@ LOOKBACK_WINDOW = 20
 SHARPE_REWARD_ETA = 0.1
 RISK_FREE_RATE = 0.02
 EPISODE_STEPS = 252          # ~1 trading year
-TRAIN_TIMESTEPS = 100_000      # per trial
+TRAIN_TIMESTEPS = 150_000      # per trial
 SEED = 42
 
 

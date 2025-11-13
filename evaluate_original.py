@@ -1,4 +1,4 @@
-# evaluate.py
+# evaluate_original.py
 
 import os
 import numpy as np
@@ -9,13 +9,36 @@ from gymnasium.wrappers import FlattenObservation
 
 from trading_env import TradingEnv
 
-def _flatten_obs(obs):
-    """Flatten Dict observation into a 1D numpy array for SB3 predict."""
-    if isinstance(obs, dict):
-        return np.concatenate(
-            [obs['market_data'].ravel(), obs['portfolio_status'].ravel()]
-        ).astype(np.float32)
-    return obs
+
+def _unwrap_to_base(env):
+    """Walk through wrappers until we find the env that carries .history."""
+    base = env
+    depth_guard = 0
+    # gymnasium wrappers expose .env; stop once we see .history or after a few hops
+    while hasattr(base, "env") and not hasattr(base, "history") and depth_guard < 10:
+        base = base.env
+        depth_guard += 1
+    return base
+
+
+def _force_liquidation(base_env):
+    """Sell any remaining position at the last known price and log it."""
+    if hasattr(base_env, "shares_held") and base_env.shares_held > 0:
+        last_idx = min(base_env.current_step, base_env.n_steps - 1)
+        last_price = float(base_env.df.loc[base_env.df.index[last_idx], "Close_raw"])
+        proceeds = base_env.shares_held * last_price * (1 - base_env.transaction_cost_pct)
+        base_env.cash += proceeds
+        base_env.shares_held = 0.0
+        base_env.portfolio_value = float(base_env.cash)
+        base_env.history.append({
+            "date": base_env.df.index[last_idx],
+            "close": last_price,
+            "cash": float(base_env.cash),
+            "shares_held": float(base_env.shares_held),
+            "portfolio_value": float(base_env.portfolio_value),
+            "action": 1,  # mark as Sell
+            "reward": 0.0,
+        })
 
 
 def main():
@@ -23,9 +46,9 @@ def main():
     TICKER = "AMZN"
     DATA_PATH = os.path.join("processed", f"{TICKER}_all_splits.csv")
 
-    # <<< tuned model + tuned results file >>>
-    MODEL_PATH = os.path.join("models", "ppo_trading_agent_tuned.zip")
-    RESULTS_SAVE_PATH = os.path.join("results", "backtest_results_tuned.csv")
+    # ORIGINAL model path & results file
+    MODEL_PATH = os.path.join("models", "ppo_trading_agent.zip")
+    RESULTS_SAVE_PATH = os.path.join("results", "backtest_results.csv")
 
     INITIAL_CAPITAL = 100000.0
     TRANSACTION_COST_PCT = 0.001
@@ -34,56 +57,51 @@ def main():
 
     # --- 2) Load model ---
     print(f"Step 2: Loading PPO model from {MODEL_PATH}...")
-    try:
-        model = PPO.load(MODEL_PATH)
-    except FileNotFoundError:
-        print(f"Error: Model file not found at {MODEL_PATH}")
-        return
+    model = PPO.load(MODEL_PATH)
     print("Model loaded successfully.")
 
     # --- 3) Load data (DD-MM-YYYY -> parse with dayfirst) ---
     print("Step 3: Loading and preparing the test data...")
-    try:
-        df = pd.read_csv(DATA_PATH, index_col="Date", parse_dates=True, dayfirst=True)
-    except FileNotFoundError:
-        print(f"Error: Data file not found at {DATA_PATH}")
-        return
+    df = pd.read_csv(DATA_PATH, index_col="Date", parse_dates=True, dayfirst=True)
 
     # Chronological split
     train_size = int(len(df) * 0.70)
     val_size = int(len(df) * 0.15)
-    test_df = df.iloc[train_size + val_size :]
+    test_df = df.iloc[train_size + val_size:]
 
     print(f"Data loaded. Test period: {test_df.index.min()} to {test_df.index.max()}")
     print(f"Number of days in test set: {len(test_df)}")
 
-    # --- 4) Env (raw env) ---
-    print("Step 4: Instantiating the test environment...")
-    env = TradingEnv(
+    # --- 4) Build env ---
+    # Your TradingEnv emits a Dict observation. The original model (MlpPolicy) expects a flat Box.
+    # So we always wrap with FlattenObservation here.
+    base_env = TradingEnv(
         df=test_df,
         lookback_window=LOOKBACK_WINDOW,
         initial_capital=INITIAL_CAPITAL,
         transaction_cost_pct=TRANSACTION_COST_PCT,
-        sharpe_reward_eta=SHARPE_REWARD_ETA,
+        # sharpe_reward_eta=SHARPE_REWARD_ETA,
+        # keep any realism knobs you use in training/eval:
+        # trade_deadband=0.05, trade_cooldown=3, slippage_bps=1.0
     )
+    env = FlattenObservation(base_env)
 
-    obs, _ = env.reset()
-    obs = _flatten_obs(obs)   # <- ensure flat before first predict
-
-# --- 5) Backtest loop ---
+    # --- 5) Backtest loop ---
     print("Step 5: Running the evaluation loop (backtest)...")
+    obs, _ = env.reset()
+
     max_steps = len(test_df)
     action_counts = {0: 0, 1: 0, 2: 0}
+    ACTION_NAMES = {0: "Flat (0%)", 1: "Half (50%)", 2: "Full (100%)"}
+
+    def to_int(a):
+        # PPO may return np arrays or scalars; normalize to plain int
+        return int(np.asarray(a).item())
 
     for _ in range(max_steps):
-        # always flatten before predict
-        obs = _flatten_obs(obs)
         action, _ = model.predict(obs, deterministic=True)
-        action = int(np.asarray(action).item())
-
-        next_obs, reward, done, truncated, info = env.step(action)
-        obs = _flatten_obs(next_obs)   # <- flatten every step too
-
+        action = to_int(action)
+        obs, reward, done, truncated, info = env.step(action)
         if action in action_counts:
             action_counts[action] += 1
         if done or truncated:
@@ -92,27 +110,10 @@ def main():
     else:
         print("Evaluation finished (reached max test steps).")
 
+    # --- 6) Force liquidation, store results ---
+    base = _unwrap_to_base(env)
+    _force_liquidation(base)
 
-    # --- Force liquidation at end so PnL is realized ---
-    base = env.unwrapped  # unwrap to TradingEnv
-    if hasattr(base, "shares_held") and base.shares_held > 0:
-        last_idx = base.current_step if base.current_step < base.n_steps else base.n_steps - 1
-        last_price = float(base.df.loc[base.df.index[last_idx], "Close_raw"])
-        proceeds = base.shares_held * last_price * (1 - base.transaction_cost_pct)
-        base.cash += proceeds
-        base.shares_held = 0.0
-        base.portfolio_value = base.cash
-        base.history.append({
-            "date": base.df.index[last_idx],
-            "close": last_price,
-            "cash": float(base.cash),
-            "shares_held": float(base.shares_held),
-            "portfolio_value": float(base.portfolio_value),
-            "action": 1,   # Sell
-            "reward": 0.0,
-        })
-
-    # --- 6) Save results ---
     print("Step 6: Storing and analyzing results...")
     os.makedirs("results", exist_ok=True)
 
@@ -139,12 +140,13 @@ def main():
         print(f"Cumulative Return: {cum_ret:.2%}")
         print(f"Max Drawdown:      {dd:.2%}")
 
+    # --- 8) Final state & action counts ---
     print("\n--- Final State ---")
     print(f"Cash: ${base.cash:,.2f} | Shares: {base.shares_held:.4f} | "
           f"Portfolio: ${base.portfolio_value:,.2f}")
 
     print("\n--- Action Counts ---")
-    print({0: "Buy", 1: "Sell", 2: "Hold"})
+    print(ACTION_NAMES)
     print(action_counts)
 
     print("\nEvaluation step complete.")

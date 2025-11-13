@@ -3,167 +3,117 @@
 import pandas as pd
 import numpy as np
 
-def simulate_buy_and_hold(data, initial_capital, transaction_cost_pct):
+def _price_series(df: pd.DataFrame) -> pd.Series:
     """
-    Simulates a Buy and Hold strategy, including transaction costs.
-
-    This function buys the maximum possible number of shares on the first day
-    and holds them until the end, calculating the portfolio value at each step.
-
-    Args:
-        data (pd.DataFrame): The preprocessed test dataset. Must contain an 'Adj Close' column.
-                             The DataFrame's index should be the timestamps.
-        initial_capital (float): The starting amount of cash.
-        transaction_cost_pct (float): The percentage cost for each transaction (buy or sell).
-
-    Returns:
-        tuple: A tuple containing:
-            - final_portfolio_value (float): The final liquidated value of the portfolio.
-            - portfolio_history (pd.Series): A Series with the portfolio's value at each time step,
-                                             indexed by date.
+    Prefer Close_raw (true price). Fall back to Close with a warning.
     """
-    # Initialize our portfolio state variables
-    cash = initial_capital
-    shares_held = 0
-    # This list will store the value of our portfolio at the end of each day
-    portfolio_history = []
+    if "Close_raw" in df.columns:
+        return df["Close_raw"]
+    if "Close" in df.columns:
+        print("Warning: Close_raw not found; falling back to Close.")
+        return df["Close"]
+    raise ValueError("Neither 'Close_raw' nor 'Close' found in data.")
 
-    # --- Day 1: The Initial Purchase ---
-    # Get the price on the very first day of the simulation period
-    first_day_price = data['Close'].iloc[0]
-    
-    # Calculate the cost of one share, including the transaction fee
-    # We multiply by (1 + cost) because the fee is added to the price
-    cost_per_share = first_day_price * (1 + transaction_cost_pct)
-    
-    # Calculate the maximum number of shares we can afford
-    if cost_per_share > 0:
-        # We use floor division (//) because we can only buy whole shares
-        shares_to_buy = cash // cost_per_share
-    else:
-        shares_to_buy = 0
-        
-    # Update our portfolio state after the purchase
-    if shares_to_buy > 0:
-        # Deduct the total cost of the purchase from our cash
-        cash -= shares_to_buy * cost_per_share
-        shares_held = shares_to_buy
-
-    # Record the initial value of the portfolio on day 1
-    # This value is our remaining cash plus the market value of the shares we just bought.
-    initial_portfolio_value = cash + (shares_held * first_day_price)
-    portfolio_history.append(initial_portfolio_value)
-    
-    # --- Days 2 to N: The Holding Period ---
-    # We loop through the rest of the data, starting from the second day (index 1)
-    for i in range(1, len(data)):
-        # Get the closing price for the current day
-        current_price = data['Close'].iloc[i]
-        
-        # In a hold period, our cash doesn't change.
-        # The portfolio's value changes only because the value of our held shares changes.
-        current_portfolio_value = cash + (shares_held * current_price)
-        portfolio_history.append(current_portfolio_value)
-        
-    # --- Final Value Calculation (Liquidation) ---
-    # To get a final, concrete value, we simulate selling all shares on the last day.
-    last_day_price = data['Close'].iloc[-1]
-    
-    # Calculate the proceeds from selling all our shares, accounting for the transaction fee.
-    # We multiply by (1 - cost) because the fee is deducted from the sale price.
-    sell_proceeds = (shares_held * last_day_price) * (1 - transaction_cost_pct)
-    
-    # The final value is our leftover cash plus the proceeds from this final sale.
-    final_portfolio_value = cash + sell_proceeds
-
-    # Create a pandas Series from our history list, using the original DataFrame's index.
-    # This is crucial for plotting later, as it aligns our values with the correct dates.
-    portfolio_history_series = pd.Series(portfolio_history, index=data.index)
-    
-    return final_portfolio_value, portfolio_history_series
-
-# highlight-start
-def simulate_sma_crossover(data, initial_capital, transaction_cost_pct, short_window, long_window):
+def simulate_buy_and_hold(data: pd.DataFrame,
+                          initial_capital: float,
+                          transaction_cost_pct: float):
     """
-    Simulates an SMA Crossover strategy.
-
-    Buys when the short-term SMA crosses above the long-term SMA (Golden Cross).
-    Sells when the short-term SMA crosses below the long-term SMA (Death Cross).
-
-    Args:
-        data (pd.DataFrame): The test dataset. Must contain 'Adj Close',
-                             and SMA columns named f'SMA_{short_window}' and f'SMA_{long_window}'.
-        initial_capital (float): The starting amount of cash.
-        transaction_cost_pct (float): The percentage cost for each transaction.
-        short_window (int): The lookback period for the short-term SMA.
-        long_window (int): The lookback period for the long-term SMA.
-
-    Returns:
-        tuple: A tuple containing:
-            - final_portfolio_value (float): The final liquidated value of the portfolio.
-            - portfolio_history (pd.Series): A Series with the portfolio's value at each time step.
+    Buy-and-hold baseline using true prices (Close_raw) and fractional shares.
+    Buys on day 1 (paying fees), holds to last day, then liquidates (paying fees).
+    Returns: (final_portfolio_value, portfolio_history_series)
     """
-    # Define the names of the SMA columns based on the window sizes
-    short_sma_col = f'SMA_{short_window}'
-    long_sma_col = f'SMA_{long_window}'
-    
-    # Ensure the required SMA columns exist in the data
-    if short_sma_col not in data.columns or long_sma_col not in data.columns:
-        raise ValueError(f"Data must contain '{short_sma_col}' and '{long_sma_col}' columns.")
+    px = _price_series(data)
+    if len(px) == 0:
+        return float(initial_capital), pd.Series(dtype=float)
 
-    # Initialize portfolio state
-    cash = initial_capital
-    shares_held = 0
-    position = 'neutral'  # Can be 'neutral' or 'long'
-    portfolio_history = []
+    cash = float(initial_capital)
+    shares = 0.0
+    history = []
 
-    # Loop through the data starting from the first day
-    for i in range(len(data)):
-        current_price = data['Close'].iloc[i]
-        
-        # We need at least one previous day to check for a crossover
+    # --- Initial buy (fractional) ---
+    p0 = float(px.iloc[0])
+    if p0 > 0:
+        # spend all cash accounting for fee on buy
+        shares = cash / (p0 * (1.0 + transaction_cost_pct))
+        spend = shares * p0 * (1.0 + transaction_cost_pct)
+        cash -= spend
+    # record day 1 portfolio value (no sell yet)
+    history.append(cash + shares * p0)
+
+    # --- Hold period ---
+    for i in range(1, len(px)):
+        p = float(px.iloc[i])
+        history.append(cash + shares * p)
+
+    # --- Liquidate on last day, including fee ---
+    plast = float(px.iloc[-1])
+    proceeds = shares * plast * (1.0 - transaction_cost_pct)
+    final_value = cash + proceeds
+
+    series = pd.Series(history, index=data.index, name="portfolio_value")
+    return float(final_value), series
+
+
+def simulate_sma_crossover(data: pd.DataFrame,
+                           initial_capital: float,
+                           transaction_cost_pct: float,
+                           short_window: int,
+                           long_window: int):
+    """
+    SMA crossover baseline using true prices (Close_raw) and fractional shares.
+    Golden cross: go long (all-in). Death cross: exit (all-out).
+    Fees applied on both entries and exits.
+    Returns: (final_portfolio_value, portfolio_history_series)
+    """
+    sma_s = f"SMA_{short_window}"
+    sma_l = f"SMA_{long_window}"
+    if sma_s not in data.columns or sma_l not in data.columns:
+        raise ValueError(f"Missing SMA columns: {sma_s}, {sma_l}")
+
+    px = _price_series(data)
+    if len(px) == 0:
+        return float(initial_capital), pd.Series(dtype=float)
+
+    cash = float(initial_capital)
+    shares = 0.0
+    long_on = False
+    history = []
+
+    # iterate over dates
+    for i in range(len(px)):
+        p = float(px.iloc[i])
+
         if i > 0:
-            # Get SMA values for the current and previous day
-            short_sma_current = data[short_sma_col].iloc[i]
-            long_sma_current = data[long_sma_col].iloc[i]
-            short_sma_previous = data[short_sma_col].iloc[i-1]
-            long_sma_previous = data[long_sma_col].iloc[i-1]
+            s_prev, l_prev = data[sma_s].iloc[i-1], data[sma_l].iloc[i-1]
+            s_now,  l_now  = data[sma_s].iloc[i],   data[sma_l].iloc[i]
 
-            # --- Check for Trading Signals ---
-            # Golden Cross: Buy signal
-            if short_sma_current > long_sma_current and short_sma_previous < long_sma_previous and position == 'neutral':
-                # Calculate cost and number of shares to buy with all available cash
-                cost_per_share = current_price * (1 + transaction_cost_pct)
-                if cost_per_share > 0:
-                    shares_to_buy = cash // cost_per_share
-                    if shares_to_buy > 0:
-                        cash -= shares_to_buy * cost_per_share
-                        shares_held = shares_to_buy
-                        position = 'long' # Update position state
+            # Golden cross: enter long (all-in)
+            if (s_now > l_now) and (s_prev <= l_prev) and not long_on and p > 0:
+                # use all cash accounting for buy fee
+                qty = cash / (p * (1.0 + transaction_cost_pct))
+                spend = qty * p * (1.0 + transaction_cost_pct)
+                if qty > 0 and spend <= cash + 1e-9:
+                    shares += qty
+                    cash -= spend
+                    long_on = True
 
-            # Death Cross: Sell signal
-            elif short_sma_current < long_sma_current and short_sma_previous > long_sma_previous and position == 'long':
-                # Sell all held shares
-                sell_proceeds = (shares_held * current_price) * (1 - transaction_cost_pct)
-                cash += sell_proceeds
-                shares_held = 0
-                position = 'neutral' # Update position state
+            # Death cross: exit long (all-out)
+            elif (s_now < l_now) and (s_prev >= l_prev) and long_on and shares > 0:
+                proceeds = shares * p * (1.0 - transaction_cost_pct)
+                cash += proceeds
+                shares = 0.0
+                long_on = False
 
-        # Calculate portfolio value for the current day regardless of trading
-        current_portfolio_value = cash + (shares_held * current_price)
-        portfolio_history.append(current_portfolio_value)
+        # mark-to-market
+        history.append(cash + shares * p)
 
-    # --- Final Value Calculation (Liquidation) ---
-    # To ensure a fair comparison, we liquidate any final holdings
-    last_day_price = data['Close'].iloc[-1]
-    if shares_held > 0:
-        sell_proceeds = (shares_held * last_day_price) * (1 - transaction_cost_pct)
-        cash += sell_proceeds
-    
-    final_portfolio_value = cash
-    
-    # Create the pandas Series for the portfolio history
-    portfolio_history_series = pd.Series(portfolio_history, index=data.index)
-    
-    return final_portfolio_value, portfolio_history_series
-# highlight-end
+    # Liquidate at the end if still long
+    if shares > 0.0:
+        plast = float(px.iloc[-1])
+        proceeds = shares * plast * (1.0 - transaction_cost_pct)
+        cash += proceeds
+        shares = 0.0
+
+    final_value = cash
+    series = pd.Series(history, index=data.index, name="portfolio_value")
+    return float(final_value), series

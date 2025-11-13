@@ -13,12 +13,12 @@ def main():
     found during the tuning phase.
     """
     # --- 1. Configuration & The Winning Formula ---
-    TICKER = 'AAPL'
+    TICKER = 'AMZN'
     INITIAL_CAPITAL = 100000.0
     TRANSACTION_COST_PCT = 0.001
     LOOKBACK_WINDOW = 20
     SHARPE_REWARD_ETA = 0.1
-    TRAIN_TIMESTEPS = 1_000_000 # Use the full training duration
+    TRAIN_TIMESTEPS = 1_000_00 # Use the full training duration
 
     # Define the path for the final, tuned model
     # We name it differently to distinguish it from the first model.

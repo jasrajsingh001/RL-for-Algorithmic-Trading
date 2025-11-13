@@ -4,61 +4,57 @@ import os
 import pandas as pd
 
 from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3 import PPO
+from gymnasium.wrappers import FlattenObservation
 
 from trading_env import TradingEnv
-from gymnasium.wrappers import FlattenObservation
-from stable_baselines3.common.monitor import Monitor  # optional but helpful
+
 
 def main():
     # --- 1. Config ---
-    TICKER = 'AAPL'
-    DATA_PATH = os.path.join('processed', f'{TICKER}_all_splits.csv')
+    TICKER = "AMZN"
+    DATA_PATH = os.path.join("processed", f"{TICKER}_all_splits.csv")
 
-    TENSORBOARD_LOG_DIR = os.path.join('logs', 'tensorboard_logs')
-    MODEL_SAVE_DIR = os.path.join('models')
+    LOG_DIR = os.path.join("logs", "tensorboard_logs")
+    MODEL_DIR = os.path.join("models")
 
     INITIAL_CAPITAL = 100000.0
     TRANSACTION_COST_PCT = 0.001
     LOOKBACK_WINDOW = 20
-    SHARPE_REWARD_ETA = 0.1
 
-    TRAINING_TIMESTEPS = 100_000
-    SEED = 42  # <- optional: reproducibility
+    TRAINING_TIMESTEPS = 25_000  # bump up as needed
+    SEED = 42
 
-    os.makedirs(TENSORBOARD_LOG_DIR, exist_ok=True)
-    os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
 
     # --- 2. Load data (DD-MM-YYYY -> dayfirst=True) ---
     print("Step 2: Loading and preparing data...")
     try:
-        df = pd.read_csv(DATA_PATH, index_col='Date', parse_dates=True, dayfirst=True)
+        df = pd.read_csv(DATA_PATH, index_col="Date", parse_dates=True, dayfirst=True)
     except FileNotFoundError:
         print(f"Error: Data file not found at {DATA_PATH}")
-        print("Please ensure you have run the data processing scripts from Step 2.")
         return
 
-    train_size = int(len(df) * 0.7)
+    train_size = int(len(df) * 0.70)
     train_df = df.iloc[:train_size]
-
     print(f"Data loaded. Training period: {train_df.index.min()} to {train_df.index.max()}")
-    if "Close_raw" not in train_df.columns:
-        raise ValueError("Expected 'Close_raw' in data for pricing. Make sure process_data added it.")
 
-    # --- 3. Build env ---
+    if "Close_raw" not in train_df.columns:
+        raise ValueError("Expected 'Close_raw' in data for pricing. Make sure your processing step added it.")
+
+    # --- 3. Build env (Dict obs -> we will flatten for MlpPolicy) ---
     print("Step 3: Instantiating the trading environment...")
     base_env = TradingEnv(
         df=train_df,
         lookback_window=LOOKBACK_WINDOW,
         initial_capital=INITIAL_CAPITAL,
         transaction_cost_pct=TRANSACTION_COST_PCT,
-        sharpe_reward_eta=SHARPE_REWARD_ETA,
-        trade_deadband=0.05,   # try 0.03–0.07 later
-        trade_cooldown=3,      # try 2–5 later
-        slippage_bps=1.0
+        # return_dict_obs defaults to True (fine here because we will flatten below)
     )
 
-    # 3a. Env check on the base Dict-obs env (good sanity check)
+    # Optional sanity check on the dict-obs env
     print("Step 3a: Checking the environment's compatibility...")
     try:
         check_env(base_env)
@@ -67,7 +63,7 @@ def main():
         print(f"Environment check failed: {e}")
         return
 
-    # Flatten Dict -> Box for PPO, and add Monitor for logging
+    # PPO/MlpPolicy expects a Box; flatten the Dict obs and wrap with Monitor
     env = FlattenObservation(base_env)
     env = Monitor(env)
 
@@ -76,11 +72,20 @@ def main():
     model = PPO(
         policy="MlpPolicy",
         env=env,
+        tensorboard_log=LOG_DIR,
         verbose=1,
-        tensorboard_log=TENSORBOARD_LOG_DIR,
-        seed=SEED,  # optional
-        # You can tune these later if learning is sluggish:
-        # learning_rate=3e-4, n_steps=2048, batch_size=256, ent_coef=0.01,
+        seed=SEED,
+        # exploration-friendly defaults
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=256,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.02,           # encourage exploration so it doesn't collapse to a single action
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        policy_kwargs=dict(net_arch=[256, 256]),
     )
 
     # --- 5. Train ---
@@ -88,11 +93,12 @@ def main():
     model.learn(total_timesteps=TRAINING_TIMESTEPS)
 
     # --- 6. Save ---
-    model_save_path = os.path.join(MODEL_SAVE_DIR, 'ppo_trading_agent.zip')
-    print(f"Step 6: Saving the trained model to: {model_save_path}")
-    model.save(model_save_path)
+    model_path = os.path.join(MODEL_DIR, "ppo_trading_agent.zip")
+    print(f"Step 6: Saving the trained model to: {model_path}")
+    model.save(model_path)
 
     print("\nTraining complete and model saved!")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

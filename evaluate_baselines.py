@@ -1,94 +1,84 @@
 # evaluate_baselines.py
 
+import os
 import pandas as pd
-# highlight-start
-# We'll need the 'os' module to create a directory for our results
-import os 
-# highlight-end
+
 from baselines import simulate_buy_and_hold, simulate_sma_crossover
 from performance_metrics import calculate_performance_metrics
 
 # --- Configuration ---
-TICKER = 'AMZN'
-PROCESSED_DATA_PATH = f'processed/{TICKER}_test.csv'
-# highlight-start
-# Define the output path for our results
-RESULTS_DIR = 'results'
-BASELINE_METRICS_PATH = os.path.join(RESULTS_DIR, 'baseline_metrics.csv')
-# highlight-end
+TICKER = "AMZN"
+
+# Use the same combined file and slicing as your RL eval
+PROCESSED_DATA_PATH = os.path.join("processed", f"{TICKER}_all_splits.csv")
+
+RESULTS_DIR = "results"
+BASELINE_METRICS_PATH = os.path.join(RESULTS_DIR, "baseline_metrics.csv")
+BASIS_EQUITY_BH_PATH = os.path.join(RESULTS_DIR, f"{TICKER}_bh_equity.csv")
+BASIS_EQUITY_SMA_PATH = os.path.join(RESULTS_DIR, f"{TICKER}_sma_equity.csv")
+
 INITIAL_CAPITAL = 100000.0
 TRANSACTION_COST_PCT = 0.001
 SHORT_WINDOW = 20
 LONG_WINDOW = 50
 
-# --- Load Data ---
+# --- Load Data (DD-MM-YYYY -> dayfirst=True) ---
 try:
-    test_data = pd.read_csv(PROCESSED_DATA_PATH, index_col='Date', parse_dates=True)
+    df = pd.read_csv(PROCESSED_DATA_PATH, index_col="Date", parse_dates=True, dayfirst=True)
 except FileNotFoundError:
     print(f"Error: Processed data file not found at {PROCESSED_DATA_PATH}")
-    print("Please ensure you have run the data processing scripts from Step 2.")
-    exit()
+    print("Make sure your processing script created *_all_splits.csv.")
+    raise SystemExit(1)
 
-# highlight-start
-# --- Data Structure to Hold All Results ---
-# We will create a list to hold the metrics dictionary for each strategy.
-# This list of dictionaries is a perfect format to convert into a pandas DataFrame.
+# Chronological split identical to your RL workflow
+train_size = int(len(df) * 0.70)
+val_size = int(len(df) * 0.15)
+test_df = df.iloc[train_size + val_size :].copy()
+
+# --- Collect results here ---
 all_results = []
-# highlight-end
 
-# --- Simulate Buy and Hold ---
+# --- Buy & Hold ---
 print(f"--- Running 'Buy and Hold' Baseline for {TICKER} ---")
-_, history_bh = simulate_buy_and_hold(
-    data=test_data, 
-    initial_capital=INITIAL_CAPITAL, 
-    transaction_cost_pct=TRANSACTION_COST_PCT
+_, bh_history = simulate_buy_and_hold(
+    data=test_df,
+    initial_capital=INITIAL_CAPITAL,
+    transaction_cost_pct=TRANSACTION_COST_PCT,
 )
-metrics_bh = calculate_performance_metrics(history_bh)
-# highlight-start
-# Add a 'Strategy' key to the dictionary before appending it to our list
-metrics_bh['Strategy'] = 'Buy and Hold'
+metrics_bh = calculate_performance_metrics(bh_history)
+metrics_bh["Strategy"] = "Buy and Hold"
 all_results.append(metrics_bh)
-# highlight-end
 
-# --- Simulate SMA Crossover ---
+# Save equity curve for reference
+os.makedirs(RESULTS_DIR, exist_ok=True)
+bh_history.to_csv(BASIS_EQUITY_BH_PATH)
+
+# --- SMA Crossover ---
 print(f"--- Running 'SMA Crossover' Baseline for {TICKER} ---")
-_, history_sma = simulate_sma_crossover(
-    data=test_data,
+_, sma_history = simulate_sma_crossover(
+    data=test_df,
     initial_capital=INITIAL_CAPITAL,
     transaction_cost_pct=TRANSACTION_COST_PCT,
     short_window=SHORT_WINDOW,
-    long_window=LONG_WINDOW
+    long_window=LONG_WINDOW,
 )
-metrics_sma = calculate_performance_metrics(history_sma)
-# highlight-start
-# Add a 'Strategy' key to this dictionary as well
-metrics_sma['Strategy'] = f'SMA Crossover ({SHORT_WINDOW}/{LONG_WINDOW})'
+metrics_sma = calculate_performance_metrics(sma_history)
+metrics_sma["Strategy"] = f"SMA Crossover ({SHORT_WINDOW}/{LONG_WINDOW})"
 all_results.append(metrics_sma)
-# highlight-end
 
-# highlight-start
-# --- Consolidate and Save Results ---
+# Save equity curve for reference
+sma_history.to_csv(BASIS_EQUITY_SMA_PATH)
 
-# Convert the list of dictionaries into a single pandas DataFrame
-results_df = pd.DataFrame(all_results)
-
-# Set the 'Strategy' column as the index of the DataFrame for clear, tabular display
-results_df.set_index('Strategy', inplace=True)
-
-# Ensure the results directory exists before trying to save the file
-os.makedirs(RESULTS_DIR, exist_ok=True)
-
-# Save the DataFrame to a CSV file. The index=True argument ensures that our
-# strategy names are saved as the first column.
+# --- Consolidate & Save ---
+results_df = pd.DataFrame(all_results).set_index("Strategy")
 results_df.to_csv(BASELINE_METRICS_PATH, index=True)
 
-# Print the final, consolidated DataFrame to the console
-print("\n" + "="*50)
+print("\n" + "=" * 50)
 print("      CONSOLIDATED BASELINE PERFORMANCE")
-print("="*50)
-# We use pd.options to format the floating point numbers for a cleaner printout
-with pd.option_context('display.float_format', '{:,.2f}'.format):
+print("=" * 50)
+with pd.option_context("display.float_format", "{:,.2f}".format):
     print(results_df)
-print("="*50)
-print(f"\nBaseline results have been saved to: {BASELINE_METRICS_PATH}")
-# highlight-end
+print("=" * 50)
+print(f"\nBaseline metrics saved to: {BASELINE_METRICS_PATH}")
+print(f"BH equity saved to:  {BASIS_EQUITY_BH_PATH}")
+print(f"SMA equity saved to: {BASIS_EQUITY_SMA_PATH}")

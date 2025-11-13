@@ -159,7 +159,7 @@ def plot_equity_curves(strategies: dict, title: str):
 #   Main
 # =========================
 def main():
-    TICKER = "AAPL"
+    TICKER = "AMZN"
     RISK_FREE_RATE = 0.02
     INITIAL_CAPITAL = 100000.0
     TRANSACTION_COST_PCT = 0.001
